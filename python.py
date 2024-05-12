@@ -1,3 +1,5 @@
+# based on this: https://ultraconfig.com.au/blog/introduction-to-the-bitcoin-network-protocol-using-python-and-tcp-sockets/
+
 # Import dependencies
 import socket
 import time
@@ -6,39 +8,70 @@ import struct
 import hashlib
 import binascii
 
-# Binary encode the sub-version
-def create_sub_version():
-    sub_version = "/Satoshi:0.7.2/"
-    return b'\x0F' + sub_version.encode()
-
 # Binary encode the network addresses
 def create_network_address(ip_address, port):
-    network_address = struct.pack('>8s16sH', b'\x01', 
-        bytearray.fromhex("00000000000000000000ffff") + socket.inet_aton(ip_address), port)
+    # service
+    # 1	NODE_NETWORK	This node can be asked for full blocks instead of just headers.
+    service = bytearray.fromhex("01")
+    
+    # ipv6
+    # 16 byte IPv4-mapped IPv6 address (12 bytes 00 00 00 00 00 00 00 00 00 00 FF FF, followed by the 4 bytes of the IPv4 address).
+    ip = bytearray.fromhex("00"*10) + bytearray.fromhex("ff"*2) + socket.inet_aton(ip_address)
+
+    # port
+    # 2 byte port number in network byte order
+    port = port.to_bytes(2, byteorder='big')
+
+    network_address = struct.pack('>8s16s2s', service, ip, port)
     return(network_address)
 
 # Create the TCP request object
 def create_message(magic, command, payload):
+    # command
+    # 12 byte string, padded with 0 bytes
+    command = command.encode()
+    # Calculate the checksum of the payload and take the first 4 bytes
     checksum = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[0:4]
-    return(struct.pack('L12sL4s', magic, command.encode(), len(payload), checksum) + payload)
+    # unsigned int (I), 12 byte string (12s), unsigned int (I), 4 byte string (4s)
+    return(struct.pack('I12sI4s', magic, command, len(payload), checksum) + payload)
 
 # Create the "version" request payload
 def create_payload_version(peer_ip_address):
+    # modern version
     version = 60002
-    services = 1
+    
+    # service
+    # 1	NODE_NETWORK	This node can be asked for full blocks instead of just headers.
+    service = 1
+
+    # timestamp in seconds
     timestamp = int(time.time())
-    addr_local = create_network_address("127.0.0.1", 8333)
-    addr_peer = create_network_address(peer_ip_address, 8333)
+    
+    # receiver address
+    addr_recv = create_network_address(peer_ip_address, 8333)
+
+    # 26 empty bytes for addr_from
+    addr_from = struct.pack('<26s', b'\x00' * 26)
+
+    # random nonce
     nonce = random.getrandbits(64)
+
+    # user agent
+    # 0 bytes as we are not providing any user agent
+    # user_agent = create_sub_version()
+    user_agent = b'\x00'
+
+    # start height, 0 as we are requesting the latest block
     start_height = 0
-    payload = struct.pack('<LQQ26s26sQ16sL', version, services, timestamp, addr_peer,
-                          addr_local, nonce, create_sub_version(), start_height)
+    # little endian (<), unsigned int (I), unsigned long long (Q), 26 byte string (26s), 26 byte string (26s), unsigned long long (Q), unsigned int (I)
+    payload = struct.pack('<IQQ26s26sQ2sI', version, service, timestamp, addr_recv, addr_from, nonce, user_agent, start_height)
     return(payload)
 
 
 
 # Create the "verack" request message
 def create_message_verack():
+    # just the hex dump
     return bytearray.fromhex("f9beb4d976657261636b000000000000000000005df6e0e2")
 
 
@@ -90,15 +123,21 @@ if __name__ == '__main__':
     response_data = s.recv(buffer_size)
     print_response("version", version_message, response_data)
 
-    # Send message "verack"
+    # Send message "verack", no matter what the version was
     s.send(verack_message)
     response_data = s.recv(buffer_size)
     print_response("verack", verack_message, response_data)
+    
+    # todo spawn thread for this?
+    while True:
+        response_data = s.recv(buffer_size)
+        print(binascii.hexlify(response_data))
+        time.sleep(1)
 
     # Send message "getdata"
-    s.send(getdata_message)
-    response_data = s.recv(buffer_size)
-    print_response("getdata", getdata_message, response_data)
+    # s.send(getdata_message)
+    # response_data = s.recv(buffer_size)
+    # print_response("getdata", getdata_message, response_data)
 
     # Close the TCP connection
     s.close()
