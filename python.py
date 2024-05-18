@@ -8,7 +8,6 @@ import random
 import struct
 import hashlib
 import binascii
-import winsound
 import sys
 
 # from https://stackoverflow.com/a/14906787
@@ -33,6 +32,7 @@ sys.stdout = Logger()
 # helper to notice new block
 def beep():
     try:
+        import winsound
         frequency = 1000  # Set Frequency To 2500 Hertz
         duration = 1000  # Set Duration To 1000 ms == 1 second
         winsound.Beep(frequency, duration)
@@ -332,7 +332,7 @@ def print_block_header(payload: bytes):
     print(f'version: {version}')
     print(f'prev_block hash: {prev_block.hex()}')
     print(f'merkle_root: {merkle_root.hex()}')
-    print(f'timestamp: {datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')}')
+    print('timestamp: ' + datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S'))
     print(f'bits difficulty target: {bits}')
     print(f'nonce: {nonce}')
 
@@ -385,13 +385,23 @@ def print_transaction():
         print(f'witness count: {witness_count}')
         for _ in range(witness_count):
             witness_data_length = read_variable_length_integer_from_socket()
-            _ = recv(witness_data_length)
+            skip(witness_data_length)
     
     # skip lock time
     _ = recv(4)
     
     # transaction bitcoin value
     return value
+
+# helper to skip fields with unknown length
+def skip(n):
+    while n > 0:
+        if n > 1000000:
+            _ = recv(1000000)
+            n -= 1000000
+        else:
+            _ = recv(n)
+            n = 0
 
 # read and print transaction output, returns its bitcoin value
 def read_and_print_tx_out():
@@ -402,7 +412,7 @@ def read_and_print_tx_out():
     # script length
     script_length = read_variable_length_integer_from_socket()
     # skip script
-    _ = recv(script_length)
+    skip(script_length)
     return value
 
 # skip transaction input
@@ -412,7 +422,7 @@ def skip_tx_in():
     # script length
     script_length = read_variable_length_integer_from_socket()
     # skip script
-    _ = recv(script_length)
+    skip(script_length)
     # skip sequence
     _ = recv(4)
     
@@ -524,7 +534,7 @@ if __name__ == '__main__':
     # read whatever is coming in
     try:
         while True:
-            time.sleep(3)
+            time.sleep(1)
             response_data = recv(buffer_size)
             print_message(response_data)
     except KeyboardInterrupt:

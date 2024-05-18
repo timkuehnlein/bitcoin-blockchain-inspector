@@ -87,3 +87,11 @@ As the blocks have very large payloads, only field by field is read from the str
 ## Structure of the Script
 
 There is no structure. The main script creates a socket and does the initial handshake with the server. Then it waits for incoming messages and prints them. Details are implemented as functions.
+
+## Weakness
+
+Sometimes after doing the handshake and getting some initial messages, like addr, the socket is closed (seen as [FIN] in Wireshark). Then the script prints "No data received" in a loop. Restarting often helps. Just give it a couple of retries. Patience.
+
+## Winux
+
+Tested on Windows and Linux (only beeps on Windows for new blocks)
