@@ -8,10 +8,10 @@ import random
 import struct
 import hashlib
 import binascii
-import threading
 import winsound
 import sys
 
+# from https://stackoverflow.com/a/14906787
 class Logger(object):
     def __init__(self):
         self.terminal = sys.stdout
@@ -70,6 +70,7 @@ def recv(n):
     return tmp
 
 # helper function to read a variable length integer
+# this implementation reads from the socket on demand
 def read_variable_length_integer_from_socket():
     first_byte = recv(1)[0]
     # read variable length integer
@@ -84,6 +85,26 @@ def read_variable_length_integer_from_socket():
         decoded_integer = struct.unpack('<Q', recv(8))[0]
     
     return decoded_integer
+
+# helper function to read a variable length integer
+# this implementation reads from a given buffer
+def read_variable_length_integer(payload: bytes):
+    # read variable length integer
+    if (payload[0] < 0xfd):
+        # 1 byte
+        decoded_integer = payload[0]
+        initial_offset = 1
+    elif (payload[0] == 0xfd):
+        decoded_integer = struct.unpack('<H', payload[1:3])[0]
+        initial_offset = 3
+    elif (payload[0] == 0xfe):
+        decoded_integer = struct.unpack('<I', payload[1:5])[0]
+        initial_offset = 5
+    else:
+        decoded_integer = struct.unpack('<Q', payload[1:9])[0]
+        initial_offset = 9
+    
+    return (decoded_integer, initial_offset)
 
 # Binary encode the sub-version
 def create_sub_version():
@@ -107,6 +128,8 @@ def create_network_address(ip_address, port):
     network_address = struct.pack('>8s16sH', service, ip, port)
     return(network_address)
 
+# Read a network address
+# reverse of create_network_address
 def read_network_address(network_address):
     (service, ip, port) = struct.unpack('>8s16sH', network_address)
     service = str(service.hex())
@@ -114,7 +137,7 @@ def read_network_address(network_address):
     port = str(port)
     return(service, ip, port)
 
-# Create the TCP request object
+# Create a message
 def create_message(magic, command, payload: bytes):
     # command
     # 12 byte string, padded with 0 bytes
@@ -174,6 +197,7 @@ def create_payload_version(peer_ip_address):
         start_height)    
     return(payload)
 
+# Print the "version" payload, that is being sent out
 def print_message_version(payload):
     print("############# Outgoing version message #############")
     if debug_level < 1:
@@ -197,7 +221,7 @@ def create_message_verack():
     # just the hex dump
     return bytearray.fromhex("f9beb4d976657261636b000000000000000000005df6e0e2")
 
-# Print the "verack" payload
+# Print messages
 def print_message(msg: bytes, incoming = True):
     global current_block_hash
     
@@ -217,6 +241,7 @@ def print_message(msg: bytes, incoming = True):
     
     (magic_value, command, payload_length, checksum) = struct.unpack('I12sI4s', msg[0:24])
     
+    # remove null bytes from the command string
     command_string = command.decode().replace("\x00", "")
     print("Command: " + command_string)
     
@@ -225,40 +250,51 @@ def print_message(msg: bytes, incoming = True):
         print("Payload Length: " + str(payload_length))
         print("Checksum: " + binascii.hexlify(checksum).decode())
     
+    # handle payload if it is not empty and not a block
     if(payload_length > 0 and "block" not in command_string):
         if(incoming):
+            # read the payload from the socket
             payload = recv(payload_length)
         else:
+            # for outgoing messages, the payload is already in the message and passed in as parameter
             payload = msg[24:]
-            
-        # skip invs
-        # if ("inv" in command_string):
-        #     return
         
         if debug_level < 1:
             print("Payload: " + binascii.hexlify(payload).decode())
+            
+            # this allows to check the checksum of the payload
             sha256 = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[0:4]
             print("Checksum calculated: " + binascii.hexlify(sha256).decode())
         
+            # for alert and reject messages, print the payload. If there was a problem, it will be visible here.
             if("alert" in command_string or "reject" in command_string):
                 print(str(payload))
+                return
             
             if("getdata" in command_string):
                 parse_and_print_inv_payload(payload)
+                return
         
         if("inv" in command_string):
             inv_list = parse_and_print_inv_payload(payload)
             for (type_int, hash_bytes) in inv_list:
                 # only interested in blocks
                 if (type_int == 2):
+                    # save hash for comparison
                     current_block_hash = hash_bytes
+                    # ask for the block
                     handle_tx(binascii.hexlify(hash_bytes).decode())
+            
+            return
             
     # block payload
     if("block" in command_string):
+        # beep to notice new block
         beep()
+        # header of the block
         payload = recv(80)
         print(f"Block payload, first 80 bytes: {binascii.hexlify(payload[0:80]).decode()}")
+        # calculate the hash of the block from the first 6 fields / 80 bytes
         sha256 = hashlib.sha256(hashlib.sha256(payload[0:80]).digest()).digest()
         current_block_hash_string = binascii.hexlify(current_block_hash).decode()
         calculated_hash_string = binascii.hexlify(sha256).decode()
@@ -266,12 +302,13 @@ def print_message(msg: bytes, incoming = True):
         print(f"Hash calculated: {calculated_hash_string}")
         same = current_block_hash_string == calculated_hash_string
         print(f"Hashes are the same: {same}")
+        
         print_block_header(payload[0:80])
         
-        # at most 8 bytes
         num = read_variable_length_integer_from_socket()
         print(f'txn_count: {num}')
         
+        # iterate over transactions, print them and calculate the total value
         value = 0
         for i in range(num):
             print(f'#### transaction {i} ####')
@@ -317,26 +354,32 @@ def print_transaction():
     flag = recv(2)
     witnesses = False
     if (flag == b'0001'):
+        # flag is present, witnesses are present
         witnesses = True
         print(f'flag: {flag.hex()} / witnesses')
     else:
+        # flag is not present, no witnesses
         print('flag: no witnesses')
+        # write the read bytes to the buffer, so the next function can read them easily
         reset_stream(flag)
+    
     # tx_in count
     tx_in_count = read_variable_length_integer_from_socket()
     print(f'tx_in count: {tx_in_count}')
-    # skip tx_in
+    # skip tx_in / we are not interested in the inputs
     for _ in range(tx_in_count):
         skip_tx_in()
     # tx_out count
     tx_out_count = read_variable_length_integer_from_socket()
     print(f'tx_out count: {tx_out_count}')
+    # read tx_outs, print them and calculate the total value of the transaction
     value = 0
     for _ in range(tx_out_count):
         value += read_and_print_tx_out()
     
     print('# total transaction value: {:0.8f}'.format(value))
     
+    # skip witnesses
     if witnesses:
         witness_count = read_variable_length_integer_from_socket()
         print(f'witness count: {witness_count}')
@@ -346,8 +389,11 @@ def print_transaction():
     
     # skip lock time
     _ = recv(4)
-    return value
     
+    # transaction bitcoin value
+    return value
+
+# read and print transaction output, returns its bitcoin value
 def read_and_print_tx_out():
     # value
     value = struct.unpack('<Q', recv(8))[0]
@@ -358,7 +404,8 @@ def read_and_print_tx_out():
     # skip script
     _ = recv(script_length)
     return value
-        
+
+# skip transaction input
 def skip_tx_in():
     # skip previous_output
     _ = recv(36)
@@ -373,25 +420,25 @@ def skip_tx_in():
 def create_payload_getdata(tx_id):
     count = 1
     # only interested in blocks
-    type = 2
-    hash = bytearray.fromhex(tx_id)
-    # payload = struct.pack('<bb32s', count, type, hash)
-    # return(payload)
+    block_type = 2
+    tx_hash = bytearray.fromhex(tx_id)
     
-    payload = struct.pack('<bI32s', count, type, hash)
+    payload = struct.pack('<bI32s', count, block_type, tx_hash)
     return payload
 
-# helper function to print inv payload
+# helper function to print inv payload, return list of hashes with type
 def parse_and_print_inv_payload(payload: bytes):
-    # read inv message
+    # read the count of hashes and the initial offset to skip later in the payload
     (count, initial_offset) = read_variable_length_integer(payload)
     
     if debug_level < 1:
         print("Count: " + str(count))
     
+    # list of hashes (type + hash)
     hash_list: list[int, str] = []
     
     for i in range(count):
+        # transaction vectors are 36 bytes long
         offset = initial_offset + i * 36
         if (offset + 36 > len(payload)):
             break
@@ -418,6 +465,8 @@ def parse_and_print_inv_payload(payload: bytes):
         
     return hash_list
 
+# handle transaction
+# ask for the block with the given transaction id
 def handle_tx(tx_id: str):
     print("\n\n\nHandling tx: " + tx_id)
     getdata_payload = create_payload_getdata(tx_id)
@@ -427,60 +476,25 @@ def handle_tx(tx_id: str):
     response_data = recv(buffer_size)
     print_message(response_data)
 
-# helper function to read a variable length integer
-def read_variable_length_integer(payload: bytes):
-    print(f'payload: {binascii.hexlify(payload)}')
-    # read variable length integer
-    if (payload[0] < 0xfd):
-        # 1 byte
-        decoded_integer = payload[0]
-        initial_offset = 1
-    elif (payload[0] == 0xfd):
-        decoded_integer = struct.unpack('<H', payload[1:3])[0]
-        initial_offset = 3
-    elif (payload[0] == 0xfe):
-        decoded_integer = struct.unpack('<I', payload[1:5])[0]
-        initial_offset = 5
-    else:
-        decoded_integer = struct.unpack('<Q', payload[1:9])[0]
-        initial_offset = 9
-    
-    return (decoded_integer, initial_offset)
-
 if __name__ == '__main__':
+    # for writing bytes back, if they were not needed yet
+    # meant for optional fields in the block
     global stream_buffer
     stream_buffer = b''
     
+    # when a block is promoted, its hash is stored here, so when the block is received, it can be compared to the calculated hash
     global current_block_hash
     current_block_hash = b''
     
-    # print_message(binascii.unhexlify(test), False)
-    
-    # test inv payload
-    # test = b'0201000000c06862f7e66a0dfe70aee074c5b76f23bf4f9d39a7bdeac014c3843e195ddddd01000000b3f8708ed24122346d6b52aec7c4ad90b099659327230122e3ec5e38330a2e4e'
-    # payload = binascii.unhexlify(test)
-    
-    # break
-    # struct.unpack('<I', payload[0:1])
-    
-    
-    
-    # Start a new thread that listens for user input
-    # stop_reading = False
-    # threading.Thread(target=user_input_listener).start()
-
     # Set constants
     magic_value = 0xd9b4bef9
-    # tx_id = "fc57704eff327aecfadb2cf3774edc919ba69aba624b836461ce2be9c00a0c20"
-    # tx_id = "00000000000000000001caa3f3b70e7de9aeca10de166dde897ad4f1004b9864"
-    tx_id = "307ebb3d195b9dfc6da879ad7ad8dc0d9582962cb2bb8bbeb0ac7e5031f0a68d01000000"
-    # peer_ip_address = '104.199.184.15'
     peer_ip_address = '185.197.160.61'
-    # peer_ip_address = '51.195.28.51'
+    # other possible addresses: '104.199.184.15', '51.195.28.51'
     peer_tcp_port = 8333
+    # size of a message header
     buffer_size = 24
     
-    
+    # can be used to hide some message details
     global debug_level
     debug_level = 0
 
@@ -488,14 +502,11 @@ if __name__ == '__main__':
     version_payload = create_payload_version(peer_ip_address)
     version_message = create_message(magic_value, 'version', version_payload)
     verack_message = create_message_verack()
-    # getdata_payload = create_payload_getdata(tx_id)
-    # getdata_message = create_message(magic_value, 'getdata', getdata_payload)
 
     # Establish TCP Connection
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(60)
     print("Socket timeout: " + str(s.timeout))
-    # struct.unpack("<III", '')
     s.connect((peer_ip_address, peer_tcp_port))
 
     # Send message "version"
@@ -510,16 +521,6 @@ if __name__ == '__main__':
     response_data = recv(buffer_size)
     print_message(response_data)
     
-    
-    # todo spawn thread for this?
-    # while True:
-    #     response_data = recv(buffer_size)
-    #     print(binascii.hexlify(response_data))
-    #     time.sleep(1)
-    
-    # s.send(getdata_message)
-    # print_message(getdata_message, False)
-    
     # read whatever is coming in
     try:
         while True:
@@ -527,19 +528,9 @@ if __name__ == '__main__':
             response_data = recv(buffer_size)
             print_message(response_data)
     except KeyboardInterrupt:
+        # gracefully shut down
         print("KeyboardInterrupt")
         pass
     
-    # Send message "getdata"
-    # s.send(getdata_message)
-    # print_message(getdata_message, False)
-    # response_data = recv(buffer_size)
-    # print_message(response_data)
-    
-    # while not stop_reading:
-    #     time.sleep(1)
-    #     response_data = recv(buffer_size)
-    #     print_message(response_data)
-
     # Close the TCP connection
     s.close()

@@ -67,8 +67,23 @@ value: 0.00000000
 # total block value: 20794.57417803  <------- total block value counted up
 ```
 
+# Installation
+
+Python required: https://www.python.org/downloads/
+
 # Running
 
 `python .\python.py` runs the script.
 
 Its output is written to the console and to a log file `logfile.log` (appended).
+
+# Thoughts
+
+## Reading bytes
+As messages come in, the header is read from the socket and parsed. Then, the payload length is read from the stream and parsed, if necessary.
+
+As the blocks have very large payloads, only field by field is read from the stream. If an optional field is being read and turns out not to be there, those bytes are written to a buffer. When the next bunch of bytes need to be read from the socket, first the buffer is checked and read, then the socket.
+
+## Structure of the Script
+
+There is no structure. The main script creates a socket and does the initial handshake with the server. Then it waits for incoming messages and prints them. Details are implemented as functions.
