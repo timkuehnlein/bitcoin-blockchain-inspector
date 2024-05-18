@@ -18,4 +18,57 @@ used in the payload field.
 
 # Codebase architecture
 
-todo
+just the python cmd script :)
+
+# Example output
+
+example.log and example2.log show an example output of the script, with the notable fields highlighted below:
+
+```
+############# Incoming message #############
+Message as hex: f9beb4d9626c6f636b0000000000000036590c00159cb2e3
+Message length: 24
+Command: block
+Magic Value: 0xd9b4bef9
+Payload Length: 809270
+Checksum: 159cb2e3
+Block payload, first 80 bytes: 0080032d83b43455978ab36c57e184dcfcf92ce70cf8e83327a90200000000000000000048b8dac3f831c2b4e962aa42463f952cc028f370eab9e4f629e6c88e1c66dcc65af347669a62031759422267
+Block Hash: 38a325a457f93b4de8021090dee4c0397de10dc9d5bf01000000000000000000
+Hash calculated: 38a325a457f93b4de8021090dee4c0397de10dc9d5bf01000000000000000000
+Hashes are the same: True  <----------- validate hash
+version: 755204096
+prev_block hash: 83b43455978ab36c57e184dcfcf92ce70cf8e83327a902000000000000000000
+merkle_root: 48b8dac3f831c2b4e962aa42463f952cc028f370eab9e4f629e6c88e1c66dcc6
+timestamp: 2024-05-18 01:16:26 <--------------- readable timestamp
+bits difficulty target: 386097818 <---------------- difficulty target
+nonce: 1730298457 <---------------- solution nonce
+txn_count: 5256
+#### transaction 0 #### <------------ list of all transactions with values
+version: 1
+flag: no witnesses
+tx_in count: 1
+tx_out count: 5
+value: 0.00000546
+value: 3.25482119
+value: 0.00000000
+value: 0.00000000
+value: 0.00000000
+# total transaction value: 3.25482665
+#### transaction 1 ####
+...
+#### transaction 5255 ####
+version: 2
+flag: no witnesses
+tx_in count: 1
+tx_out count: 2
+value: 0.00003759
+value: 0.00000000
+# total transaction value: 0.00003759
+# total block value: 20794.57417803  <------- total block value counted up
+```
+
+# Running
+
+`python .\python.py` runs the script.
+
+Its output is written to the console and to a log file `logfile.log` (appended).

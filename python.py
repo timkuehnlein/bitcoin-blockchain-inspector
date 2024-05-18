@@ -9,12 +9,81 @@ import struct
 import hashlib
 import binascii
 import threading
+import winsound
+import sys
 
-# helper to cancel gracefully
-def user_input_listener():
-    input("Press enter to stop reading from the stream...")
-    global stop_reading
-    stop_reading = True
+class Logger(object):
+    def __init__(self):
+        self.terminal = sys.stdout
+        self.log = open("logfile.log", "a")
+   
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)  
+
+    def flush(self):
+        # this flush method is needed for python 3 compatibility.
+        # this handles the flush command by doing nothing.
+        # you might want to specify some extra behavior here.
+        pass    
+
+sys.stdout = Logger()
+
+
+# helper to notice new block
+def beep():
+    try:
+        frequency = 1000  # Set Frequency To 2500 Hertz
+        duration = 1000  # Set Duration To 1000 ms == 1 second
+        winsound.Beep(frequency, duration)
+    except:
+        pass
+    
+# helper to allow to buffer bytes that were read from the socket
+# but were not needed
+def reset_stream(buffer_bytes):
+    global stream_buffer
+    stream_buffer = buffer_bytes
+
+# helper to read from stream or buffer
+def recv(n):
+    global stream_buffer
+    tmp = b''
+    
+    if len(stream_buffer) > 0:
+        if (len(stream_buffer) >= n):
+            # read from buffer
+            tmp = stream_buffer[:n]
+            # remove the read bytes from the buffer
+            stream_buffer = stream_buffer[n:]
+            return tmp
+        else:
+            # read whole buffer
+            tmp = stream_buffer
+            # decrease the number of bytes to read
+            n -= len(stream_buffer)
+            # reset the buffer
+            stream_buffer = b''
+    
+    # read rest from socket
+    tmp = tmp + s.recv(n)
+    return tmp
+
+# helper function to read a variable length integer
+def read_variable_length_integer_from_socket():
+    first_byte = recv(1)[0]
+    # read variable length integer
+    if (first_byte < 0xfd):
+        # 1 byte
+        decoded_integer = first_byte
+    elif (first_byte == 0xfd):
+        decoded_integer = struct.unpack('<H', recv(2))[0]
+    elif (first_byte == 0xfe):
+        decoded_integer = struct.unpack('<I', recv(4))[0]
+    else:
+        decoded_integer = struct.unpack('<Q', recv(8))[0]
+    
+    return decoded_integer
 
 # Binary encode the sub-version
 def create_sub_version():
@@ -130,6 +199,8 @@ def create_message_verack():
 
 # Print the "verack" payload
 def print_message(msg: bytes, incoming = True):
+    global current_block_hash
+    
     if (len(msg) == 0):
         print("\nNo data received")
         return
@@ -156,7 +227,7 @@ def print_message(msg: bytes, incoming = True):
     
     if(payload_length > 0 and "block" not in command_string):
         if(incoming):
-            payload = s.recv(payload_length)
+            payload = recv(payload_length)
         else:
             payload = msg[24:]
             
@@ -177,21 +248,36 @@ def print_message(msg: bytes, incoming = True):
         
         if("inv" in command_string):
             inv_list = parse_and_print_inv_payload(payload)
-            for (type_int, hash_str) in inv_list:
+            for (type_int, hash_bytes) in inv_list:
                 # only interested in blocks
                 if (type_int == 2):
-                    handle_tx(hash_str)
+                    current_block_hash = hash_bytes
+                    handle_tx(binascii.hexlify(hash_bytes).decode())
             
     # block payload
     if("block" in command_string):
-        payload = s.recv(88)
-        print(f"Block payload, first 88 bytes: {binascii.hexlify(payload[0:88]).decode()}")
-        sha256 = hashlib.sha256(hashlib.sha256(payload[0:80]).digest()).digest()[0:4]
-        print(f"Checksum calculated: {binascii.hexlify(sha256).hex()}")
-        print_block_payload(payload[0:88])
+        beep()
+        payload = recv(80)
+        print(f"Block payload, first 80 bytes: {binascii.hexlify(payload[0:80]).decode()}")
+        sha256 = hashlib.sha256(hashlib.sha256(payload[0:80]).digest()).digest()
+        current_block_hash_string = binascii.hexlify(current_block_hash).decode()
+        calculated_hash_string = binascii.hexlify(sha256).decode()
+        print(f"Block Hash: {current_block_hash_string}")
+        print(f"Hash calculated: {calculated_hash_string}")
+        same = current_block_hash_string == calculated_hash_string
+        print(f"Hashes are the same: {same}")
+        print_block_header(payload[0:80])
         
-        payload = s.recv(payload_length - 88)
-        print(f"Block payload, remaining bytes: {binascii.hexlify(payload).decode()}")
+        # at most 8 bytes
+        num = read_variable_length_integer_from_socket()
+        print(f'txn_count: {num}')
+        
+        value = 0
+        for i in range(num):
+            print(f'#### transaction {i} ####')
+            value += print_transaction()
+            
+        print('# total block value: {:0.8f}'.format(value))
 
 
 # BLOCK PAYLOAD
@@ -204,7 +290,7 @@ def print_message(msg: bytes, incoming = True):
 # 4	            nonce	        uint32_t	The nonce used to generate this block… to allow variations of the header and compute different hashes
 # 1+	        txn_count	    var_int	    Number of transaction entries
 #  ?	        txns	        tx[]	    Block transactions, in format of "tx" command
-def print_block_payload(payload: bytes):
+def print_block_header(payload: bytes):
     (version, prev_block, merkle_root, timestamp, bits, nonce) = struct.unpack('<i32s32sIII', payload[0:80])
     print(f'version: {version}')
     print(f'prev_block hash: {prev_block.hex()}')
@@ -212,11 +298,77 @@ def print_block_payload(payload: bytes):
     print(f'timestamp: {datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')}')
     print(f'bits difficulty target: {bits}')
     print(f'nonce: {nonce}')
-    
-    # at most 8 bytes
-    (num, offset) = read_variable_length_integer(payload[80:88])
-    print(f'txn_count: {num}')
 
+# transaction
+# Field Size	Description     Data type	    Comments
+# 4	            version	        uint32_t	    Transaction data format version
+# 0 or 2	    flag	        optional        uint8_t[2]	If present, always 0001, and indicates the presence of witness data
+# 1+	        tx_in count	    var_int	        Number of Transaction inputs (never zero)
+# 41+	        tx_in	        tx_in[]	        A list of 1 or more transaction inputs or sources for coins
+# 1+	        tx_out count    var_int	        Number of Transaction outputs
+# 9+	        tx_out	        tx_out[]	    A list of 1 or more transaction outputs or destinations for coins
+# 0+	        tx_witnesses	tx_witness[]	A list of witnesses, one for each input; omitted if flag is omitted above
+# 4	            lock_time	    uint32_t	    The block number or timestamp at which this transaction is unlocked:
+def print_transaction():
+    # version
+    version = struct.unpack('<I', recv(4))[0]
+    print(f'version: {version}')
+    # flag
+    flag = recv(2)
+    witnesses = False
+    if (flag == b'0001'):
+        witnesses = True
+        print(f'flag: {flag.hex()} / witnesses')
+    else:
+        print('flag: no witnesses')
+        reset_stream(flag)
+    # tx_in count
+    tx_in_count = read_variable_length_integer_from_socket()
+    print(f'tx_in count: {tx_in_count}')
+    # skip tx_in
+    for _ in range(tx_in_count):
+        skip_tx_in()
+    # tx_out count
+    tx_out_count = read_variable_length_integer_from_socket()
+    print(f'tx_out count: {tx_out_count}')
+    value = 0
+    for _ in range(tx_out_count):
+        value += read_and_print_tx_out()
+    
+    print('# total transaction value: {:0.8f}'.format(value))
+    
+    if witnesses:
+        witness_count = read_variable_length_integer_from_socket()
+        print(f'witness count: {witness_count}')
+        for _ in range(witness_count):
+            witness_data_length = read_variable_length_integer_from_socket()
+            _ = recv(witness_data_length)
+    
+    # skip lock time
+    _ = recv(4)
+    return value
+    
+def read_and_print_tx_out():
+    # value
+    value = struct.unpack('<Q', recv(8))[0]
+    value = value / 100000000
+    print('value: {:0.8f}'.format(value))
+    # script length
+    script_length = read_variable_length_integer_from_socket()
+    # skip script
+    _ = recv(script_length)
+    return value
+        
+def skip_tx_in():
+    # skip previous_output
+    _ = recv(36)
+    # script length
+    script_length = read_variable_length_integer_from_socket()
+    # skip script
+    _ = recv(script_length)
+    # skip sequence
+    _ = recv(4)
+    
 # Create the "getdata" request payload
 def create_payload_getdata(tx_id):
     count = 1
@@ -245,7 +397,8 @@ def parse_and_print_inv_payload(payload: bytes):
             break
         
         type_integer: int = struct.unpack('<I', payload[offset:(offset + 4)])[0]
-        hash_string: str = binascii.hexlify(payload[(offset + 4):(offset + 4 + 36)]).decode()
+        hash_bytes: bytes = payload[(offset + 4):(offset + 4 + 36)]
+        hash_string: str = binascii.hexlify(hash_bytes).decode()
         
         if debug_level < 1:
             match type_integer:
@@ -261,7 +414,7 @@ def parse_and_print_inv_payload(payload: bytes):
                     print("Type: " + str(type_integer))
             print("Hash: " + hash_string)
             
-        hash_list.append((type_integer, hash_string))
+        hash_list.append((type_integer, hash_bytes))
         
     return hash_list
 
@@ -271,7 +424,7 @@ def handle_tx(tx_id: str):
     getdata_message = create_message(magic_value, 'getdata', getdata_payload)
     s.send(getdata_message)
     print_message(getdata_message, False)
-    response_data = s.recv(buffer_size)
+    response_data = recv(buffer_size)
     print_message(response_data)
 
 # helper function to read a variable length integer
@@ -295,6 +448,12 @@ def read_variable_length_integer(payload: bytes):
     return (decoded_integer, initial_offset)
 
 if __name__ == '__main__':
+    global stream_buffer
+    stream_buffer = b''
+    
+    global current_block_hash
+    current_block_hash = b''
+    
     # print_message(binascii.unhexlify(test), False)
     
     # test inv payload
@@ -334,27 +493,27 @@ if __name__ == '__main__':
 
     # Establish TCP Connection
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(60)
     print("Socket timeout: " + str(s.timeout))
     # struct.unpack("<III", '')
     s.connect((peer_ip_address, peer_tcp_port))
-    s.settimeout(120)
 
     # Send message "version"
     s.send(version_message)
     print_message_version(version_payload)
-    response_data = s.recv(buffer_size)
+    response_data = recv(buffer_size)
     print_message(response_data)    
 
     # Send message "verack", no matter what the version was
     s.send(verack_message)
     print_message(verack_message, False)
-    response_data = s.recv(buffer_size)
+    response_data = recv(buffer_size)
     print_message(response_data)
     
     
     # todo spawn thread for this?
     # while True:
-    #     response_data = s.recv(buffer_size)
+    #     response_data = recv(buffer_size)
     #     print(binascii.hexlify(response_data))
     #     time.sleep(1)
     
@@ -365,20 +524,21 @@ if __name__ == '__main__':
     try:
         while True:
             time.sleep(3)
-            response_data = s.recv(buffer_size)
+            response_data = recv(buffer_size)
             print_message(response_data)
     except KeyboardInterrupt:
+        print("KeyboardInterrupt")
         pass
     
     # Send message "getdata"
     # s.send(getdata_message)
     # print_message(getdata_message, False)
-    # response_data = s.recv(buffer_size)
+    # response_data = recv(buffer_size)
     # print_message(response_data)
     
     # while not stop_reading:
     #     time.sleep(1)
-    #     response_data = s.recv(buffer_size)
+    #     response_data = recv(buffer_size)
     #     print_message(response_data)
 
     # Close the TCP connection
